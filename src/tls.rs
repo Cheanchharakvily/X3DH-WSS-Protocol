@@ -1,5 +1,8 @@
-use anyhow::{anyhow, Result};
-use rustls::{pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer}, ClientConfig, ServerConfig};
+use anyhow::{Result, anyhow};
+use rustls::{
+    ClientConfig, ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+};
 use std::fs;
 use std::io::BufReader;
 
@@ -16,7 +19,10 @@ pub fn build_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig
     let keys: Vec<PrivatePkcs8KeyDer<'static>> = rustls_pemfile::pkcs8_private_keys(&mut rd_k)
         .map(|k| k.map(|k| k.clone_key()))
         .collect::<Result<_, _>>()?;
-    let key = keys.into_iter().next().ok_or_else(|| anyhow!("no private key"))?;
+    let key = keys
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no private key"))?;
     let key: PrivateKeyDer<'static> = key.into();
 
     let config = ServerConfig::builder()
@@ -37,5 +43,7 @@ pub fn build_client_config(ca_path: Option<&str>) -> Result<ClientConfig> {
     } else {
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
-    Ok(ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
+    Ok(ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth())
 }

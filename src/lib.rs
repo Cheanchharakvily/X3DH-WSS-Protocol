@@ -1,8 +1,8 @@
-pub mod server;
 pub mod client;
-pub mod proto;
-pub mod tls;
 pub mod crypto;
+pub mod proto;
+pub mod server;
+pub mod tls;
 pub mod util;
 
 use anyhow::Result;

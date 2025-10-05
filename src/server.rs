@@ -1,12 +1,12 @@
-use crate::crypto::{x3dh_derive_shared, AeadKey};
+use crate::crypto::{AeadKey, x3dh_derive_shared_responder};
 use crate::proto::{Ctrl, Packet};
 use crate::tls::build_server_config;
 use crate::util::b64_to_pk;
 use futures_util::{SinkExt, StreamExt};
 
-use anyhow::{anyhow, Result};
-use base64::engine::general_purpose::STANDARD as B64;
+use anyhow::{Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -41,7 +41,9 @@ pub async fn run(addr: &str, cert_pem: &str, key_pem: &str) -> Result<()> {
         let otk_pk = otk_pk.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(tcp, acceptor, id_sk, id_pk, spk_sk, spk_pk, otk_sk, otk_pk).await {
+            if let Err(e) =
+                handle_conn(tcp, acceptor, id_sk, id_pk, spk_sk, spk_pk, otk_sk, otk_pk).await
+            {
                 eprintln!("conn error: {e:?}");
             }
         });
@@ -55,36 +57,53 @@ async fn handle_conn(
     id_pk: PublicKey,
     spk_sk: StaticSecret,
     spk_pk: PublicKey,
-    _otk_sk: StaticSecret,
+    otk_sk: StaticSecret,
     otk_pk: PublicKey,
 ) -> Result<()> {
     let tls = acceptor.accept(tcp).await?;
     let mut ws = tts::accept_async(tls).await?;
 
-    ws.send(Message::Text(serde_json::to_string(&Packet::Ctrl(Ctrl::ServerPrekey {
-        identity_pk: B64.encode(id_pk.as_bytes()),
-        signed_prekey: B64.encode(spk_pk.as_bytes()),
-        one_time_pk: Some(B64.encode(otk_pk.as_bytes())),
-        signature: "demo_sig".into(),
-    }))?)).await?;
+    ws.send(Message::Text(serde_json::to_string(&Packet::Ctrl(
+        Ctrl::ServerPrekey {
+            identity_pk: B64.encode(id_pk.as_bytes()),
+            signed_prekey: B64.encode(spk_pk.as_bytes()),
+            one_time_pk: Some(B64.encode(otk_pk.as_bytes())),
+            signature: "demo_sig".into(),
+        },
+    ))?))
+    .await?;
 
     let msg = ws.next().await.ok_or_else(|| anyhow!("eof"))??;
-    let Packet::Ctrl(Ctrl::ClientInit { identity_pk, eph_pk }) = serde_json::from_str(msg.to_text()?)? else {
+    let Packet::Ctrl(Ctrl::ClientInit {
+        identity_pk,
+        eph_pk,
+    }) = serde_json::from_str(msg.to_text()?)?
+    else {
         return Err(anyhow!("expected ClientInit"));
     };
 
     let c_id = b64_to_pk(&identity_pk)?;
     let c_eph = b64_to_pk(&eph_pk)?;
-    let session = x3dh_derive_shared(&id_sk, &spk_sk, &c_id, &c_eph, Some(&c_eph));
+    let session = x3dh_derive_shared_responder(&id_sk, &spk_sk, Some(&otk_sk), &c_id, &c_eph);
     let aead = AeadKey::new(session);
 
-    ws.send(Message::Text(serde_json::to_string(&Packet::Ctrl(Ctrl::KeyConfirm { ok: true }))?)).await?;
+    ws.send(Message::Text(serde_json::to_string(&Packet::Ctrl(
+        Ctrl::KeyConfirm { ok: true },
+    ))?))
+    .await?;
 
     while let Some(msg) = ws.next().await {
         let msg = msg?;
         if let Message::Text(txt) = msg {
-            if let Packet::Data { v, nonce, ciphertext } = serde_json::from_str(&txt)? {
-                if v != 1 { continue; }
+            if let Packet::Data {
+                v,
+                nonce,
+                ciphertext,
+            } = serde_json::from_str(&txt)?
+            {
+                if v != 1 {
+                    continue;
+                }
                 let mut n12 = [0u8; 12];
                 n12.copy_from_slice(&B64.decode(nonce)?);
                 let pt = aead.open(&n12, &B64.decode(ciphertext)?)?;

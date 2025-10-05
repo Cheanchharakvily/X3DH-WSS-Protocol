@@ -1,8 +1,11 @@
-use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{
+    ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, KeyInit},
+};
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 
 pub struct AeadKey(pub Key);
 
@@ -15,7 +18,9 @@ impl AeadKey {
         let cipher = ChaCha20Poly1305::new(&self.0);
         let mut nonce = [0u8; 12];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let ct = cipher.encrypt(Nonce::from_slice(&nonce), plaintext).expect("encrypt");
+        let ct = cipher
+            .encrypt(Nonce::from_slice(&nonce), plaintext)
+            .expect("encrypt");
         (ct, nonce)
     }
 
@@ -25,6 +30,27 @@ impl AeadKey {
             .decrypt(Nonce::from_slice(nonce), ciphertext)
             .map_err(|e| anyhow::anyhow!("decrypt failed: {e:?}"))
     }
+}
+
+fn finalize_x3dh_shared(
+    dh1: &SharedSecret,
+    dh2: &SharedSecret,
+    dh3: &SharedSecret,
+    dh4: Option<&SharedSecret>,
+) -> [u8; 32] {
+    let mut concat = Vec::with_capacity(32 * 4);
+    concat.extend_from_slice(dh1.as_bytes());
+    concat.extend_from_slice(dh2.as_bytes());
+    concat.extend_from_slice(dh3.as_bytes());
+    if let Some(d) = dh4 {
+        concat.extend_from_slice(d.as_bytes());
+    }
+
+    let hk = Hkdf::<Sha256>::new(None, &concat);
+    let mut okm = [0u8; 32];
+    hk.expand(b"app-session-key", &mut okm)
+        .expect("hkdf expand");
+    okm
 }
 
 pub fn x3dh_derive_shared(
@@ -39,16 +65,20 @@ pub fn x3dh_derive_shared(
     let dh3 = our_eph_sk.diffie_hellman(their_signed_prekey);
     let dh4 = their_one_time_pk.map(|pk| our_eph_sk.diffie_hellman(pk));
 
-    let mut concat = Vec::with_capacity(32 * 4);
-    concat.extend_from_slice(dh1.as_bytes());
-    concat.extend_from_slice(dh2.as_bytes());
-    concat.extend_from_slice(dh3.as_bytes());
-    if let Some(d) = dh4 {
-        concat.extend_from_slice(d.as_bytes());
-    }
+    finalize_x3dh_shared(&dh1, &dh2, &dh3, dh4.as_ref())
+}
 
-    let hk = Hkdf::<Sha256>::new(None, &concat);
-    let mut okm = [0u8; 32];
-    hk.expand(b"app-session-key", &mut okm).unwrap();
-    okm
+pub fn x3dh_derive_shared_responder(
+    our_identity_sk: &StaticSecret,
+    our_signed_prekey_sk: &StaticSecret,
+    our_one_time_sk: Option<&StaticSecret>,
+    their_identity_pk: &PublicKey,
+    their_ephemeral_pk: &PublicKey,
+) -> [u8; 32] {
+    let dh1 = our_signed_prekey_sk.diffie_hellman(their_identity_pk);
+    let dh2 = our_identity_sk.diffie_hellman(their_ephemeral_pk);
+    let dh3 = our_signed_prekey_sk.diffie_hellman(their_ephemeral_pk);
+    let dh4 = our_one_time_sk.map(|sk| sk.diffie_hellman(their_ephemeral_pk));
+
+    finalize_x3dh_shared(&dh1, &dh2, &dh3, dh4.as_ref())
 }
